@@ -125,7 +125,7 @@ Ideally, you'll want to create and activate a [virtual environment](https://docs
 ### [PYINSTALLER](https://pyinstaller.readthedocs.io/en/stable/)
 1. ``python3 -m pip install pyinstaller``
 2. ``python3 pyinst.py``
- 
+
 ## SMILIES <img height="32" alt="pesterchum what did you do smilie" src="smilies/whatdidyoudo.gif">
 |Text|Smilie|
 |:--- | :--- |
