@@ -14,6 +14,9 @@ import ctypes
 # Set working directory
 if os.path.dirname(sys.argv[0]):
     os.chdir(os.path.dirname(sys.argv[0]))
+file_path = os.path.dirname(os.path.abspath(__file__))
+if file_path and "smilies" not in os.listdir() and "smilies" in os.listdir(file_path):
+    os.chdir(file_path)
 
 import ostools
 import pytwmn
@@ -1956,7 +1959,7 @@ class PesterWindow(MovingWindow):
         self.tabmemo.windowClosed.connect(self.memoTabsClosed)
 
     def newMemo(self, channel, timestr, secret=False, invite=False):
-        if channel == "#pesterchum":
+        if channel.casefold() == "#pesterchum":
             return
         if channel in self.memos:
             self.memos[channel].showChat()
@@ -2367,6 +2370,10 @@ class PesterWindow(MovingWindow):
             for memo in self.userprofile.getAutoJoins():
                 self.newMemo(memo, "i")
 
+    def rejoin_channels(self):
+        for memo in self.memos.keys():
+            self.joinChannel.emit(memo)
+
     @QtCore.pyqtSlot()
     def connected(self):
         if self.loadingscreen:
@@ -2374,6 +2381,7 @@ class PesterWindow(MovingWindow):
         self.loadingscreen = None
 
         self.doAutoJoins()
+        self.rejoin_channels()
 
         # Start client --> server pings
         if hasattr(self, "pingtimer"):
@@ -2446,7 +2454,7 @@ class PesterWindow(MovingWindow):
                     self.theme["convo/text/ceasepester"],
                 ),
             )
-            if not self.config.irc_compatibility_mode():
+            if not self.config.irc_compatibility_mode() and self.parent.irc_alive():
                 self.convoClosed.emit(handle)
         self.chatlog.finish(h)
         del self.convos[h]
@@ -2455,7 +2463,8 @@ class PesterWindow(MovingWindow):
     def closeMemo(self, channel):
         c = channel
         self.chatlog.finish(c)
-        self.leftChannel.emit(channel)
+        if self.parent.irc_alive():
+            self.leftChannel.emit(channel)
         try:
             del self.memos[c]
         except KeyError:
@@ -2834,6 +2843,8 @@ class PesterWindow(MovingWindow):
 
         # Join the ones on the list first
         for SelectedMemo in self.memochooser.SelectedMemos():
+            if SelectedMemo.target == "* [private memo]":
+                continue
             channel = f"#{SelectedMemo.target}"
             self.newMemo(channel, time)
 
@@ -3998,10 +4009,13 @@ class PesterWindow(MovingWindow):
             pass
         msgbox.setIcon(QtWidgets.QMessageBox.Icon.Warning)
         msgbox.setText("Server certificate validation failed")
-        msgbox.setInformativeText(
-            'Reason: "{} ({})"'.format(e.verify_message, e.verify_code)
-            + "\n\nConnect anyway?"
-        )
+        if hasattr(e, "verify_message") and hasattr(e, "e.verify_code"):
+            msgbox.setInformativeText(
+                'Reason: "{} ({})"'.format(e.verify_message, e.verify_code)
+                + "\n\nConnect anyway?"
+            )
+        else:
+            msgbox.setInformativeText("\n\nConnect anyway?")
         msgbox.setStandardButtons(
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No
@@ -4009,6 +4023,7 @@ class PesterWindow(MovingWindow):
         msgbox.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
         ret = msgbox.exec()
         if ret == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.parent.irc.stop_irc = None
             self.parent.restartIRC(verify_hostname=False)
 
     pcUpdate = QtCore.pyqtSignal(str, str)
@@ -4165,18 +4180,19 @@ class MainProgram(QtCore.QObject):
         self.app.aboutToQuit.connect(self.death)
 
     def death(self):
-        """app murder in progress, kill the IRC thread if it didnt die already."""
+        """app murder in progress, kill the IRC thread if it didn't die already."""
         PchumLog.debug("death inbound")
-        if hasattr(self, "irc"):
-            if self.irc:
-                if self.irc.isRunning():
-                    PchumLog.debug("Calling exit() on IRC thread.")
-                    self.irc.exit()
+        if self.irc and self.irc.isRunning():
+            PchumLog.debug("Calling exit() on IRC thread.")
+            self.irc.exit()
 
     # def lastWindow(self):
     #    print("all windows closed")
     #    if hasattr(self, 'widget'):
     #        self.widget.killApp()
+
+    def irc_alive(self):
+        return self.irc and self.irc.isRunning() and self.irc.is_connected()
 
     @QtCore.pyqtSlot(QtWidgets.QWidget)
     def alertWindow(self, widget):
@@ -4311,20 +4327,18 @@ class MainProgram(QtCore.QObject):
             self.widget.loadingscreen.done(QtWidgets.QDialog.DialogCode.Accepted)
             self.widget.loadingscreen = None
         self.attempts += 1
-        if hasattr(self, "irc") and self.irc:
-            self.irc.disconnectIRC()
-        else:
-            self.restartIRC()
+        if self.irc_alive():
+            self.irc.disconnect_irc()
+        self.restartIRC()
 
     @QtCore.pyqtSlot()
     def restartIRC(self, verify_hostname=True):
         if hasattr(self, "irc") and self.irc:
-            self.disconnectWidgets(self.irc, self.widget)
             stop = self.irc.stop_irc
-            del self.irc
         else:
             stop = None
         if stop is None:
+            self.disconnectWidgets(self.irc, self.widget)
             self.irc = PesterIRC(
                 self.widget,
                 self.widget.config.server(),
@@ -4405,9 +4419,6 @@ class MainProgram(QtCore.QObject):
                 )
             except Exception as e:
                 print(e)
-            msgbox.setStyleSheet(
-                "background-color: red; color: black; font-size: x-large;"
-            )
             msgbox.setText(
                 "An uncaught exception occurred: %s \n%s \n%s "
                 % (exc, value, "".join(traceback.format_tb(tb)))

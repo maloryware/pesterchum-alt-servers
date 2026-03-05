@@ -28,10 +28,10 @@ the license notice included with oyoyo source files is indented here:
     # THE SOFTWARE.
 """
 
-import time
 import socket
 import random
 import logging
+import ssl
 from ssl import SSLCertVerificationError
 
 try:
@@ -67,14 +67,11 @@ class PesterIRC(QtCore.QThread):
         QtCore.QThread.__init__(self)
         self.mainwindow = window
 
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server = server  # Server to connect to.
         self.port = port  # Port on server to connect to.
         self.password = password  # Optional password for PASS.
         self.ssl = ssl  # Whether to connect over SSL/TLS.
-        self.verify_hostname = (
-            verify_hostname  # Whether to verify server hostname. (SSL-only)
-        )
+        self.verify_hostname = verify_hostname  # SSL cert validation toggle
 
         self._send_irc = SendIRC()
 
@@ -100,6 +97,7 @@ class PesterIRC(QtCore.QThread):
             "324": self._channelmodeis,
             "353": self._namreply,
             "366": self._endofnames,
+            "404": self._noexternalmessages,
             "432": self._erroneusnickname,
             "433": self._nicknameinuse,
             "436": self._nickcollision,
@@ -161,6 +159,9 @@ class PesterIRC(QtCore.QThread):
                     PchumLog.debug("False Yield: %s, returning", res)
                     return
 
+    def is_connected(self):
+        return not self._end
+
     def _connect(self, verify_hostname=True):
         """Initiates the connection to the server set in self.server:self.port
         self.ssl decides whether the connection uses ssl.
@@ -177,10 +178,15 @@ class PesterIRC(QtCore.QThread):
         if self.ssl:
             # Upgrade connection to use SSL/TLS if enabled
             context = get_ssl_context()
-            context.check_hostname = verify_hostname
-            self.socket = context.wrap_socket(
-                plaintext_socket, server_hostname=self.server
-            )
+            if not verify_hostname:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            try:
+                self.socket = context.wrap_socket(
+                    plaintext_socket, server_hostname=self.server
+                )
+            except Exception as e:
+                raise e
         else:
             # SSL/TLS is disabled, connection is plaintext
             self.socket = plaintext_socket
@@ -218,17 +224,8 @@ class PesterIRC(QtCore.QThread):
         self._send_irc.user("pcc31", "pcc31")
 
     def _get_stuffs_from_socket(self):
-        """billions must die"""
-        tries = 0
-        while True:
-            try:
-                return self.socket.recv(1024)
-            except OSError as err:
-                PchumLog.error(err)
-                tries += 1
-                time.sleep(0.413)  # ...
-                if tries >= 3:
-                    raise err
+        """:3"""
+        return self.socket.recv(1024)
 
     def _conn_generator(self):
         """Returns a generator object."""
@@ -250,6 +247,9 @@ class PesterIRC(QtCore.QThread):
                 else:
                     if self._end:
                         break
+                    if not buffer:  # EOF?
+                        self._close()
+                        yield False
                     split_buffer = buffer.split(b"\r\n")
                     buffer = b""
                     if split_buffer[-1]:
@@ -298,21 +298,23 @@ class PesterIRC(QtCore.QThread):
 
     def _close(self):
         """Kill the socket 'with extreme prejudice'."""
-        if self.socket:
-            PchumLog.info("_close() was called, shutting down socket.")
-            self._end = True
-            try:
-                self.socket.shutdown(socket.SHUT_RDWR)
-            except OSError as exception:
-                PchumLog.info(
-                    "Error while shutting down socket, already broken? %s", exception
-                )
-            try:
-                self.socket.close()
-            except OSError as exception:
-                PchumLog.info(
-                    "Error while closing socket, already broken? %s", exception
-                )
+        self._end = True
+        if not self.socket or self.socket.fileno() == -1:
+            return
+        PchumLog.info("_close() was called, shutting down socket.")
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except OSError as exception:
+            PchumLog.info(
+                "Error while shutting down socket, already broken? %s", exception
+            )
+        try:
+            self.socket.close()
+        except OSError as exception:
+            PchumLog.info("Error while closing socket, already broken? %s", exception)
+        finally:
+            self._send_irc.socket = None
+            self.socket = None
 
     def irc_connect(self):
         """Try to connect and signal for connect-anyway prompt on cert fail."""
@@ -557,7 +559,6 @@ class PesterIRC(QtCore.QThread):
     def disconnect_irc(self):
         """Send QUIT and close connection, slot is called from main thread."""
         self._send_irc.quit(f"{_pcVersion} <3")
-        self._end = True
         self._close()
 
     @QtCore.pyqtSlot(str)
@@ -1092,6 +1093,10 @@ class PesterIRC(QtCore.QThread):
     def _saslsuccess(self, *_msg):
         """Handle 'RPL_SASLSUCCESS' reply from server, SASL authentication succeeded! woo yeah!!"""
         self.end_cap_negotiation()
+
+    def _noexternalmessages(self, _server, _handle, channel_name, msg=""):
+        """Handle 404 ERR_CANNOTSENDTOCHAN from server"""
+        self.cannotSendToChan.emit(channel_name, msg)
 
     moodUpdated = QtCore.pyqtSignal(str, Mood)
     colorUpdated = QtCore.pyqtSignal(str, QtGui.QColor)
